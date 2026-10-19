@@ -1,6 +1,7 @@
 package rulestore
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,14 +15,17 @@ import (
 // Server serves the API. The routes take no credential, so the unit binds
 // loopback only.
 type Server struct {
-	store   *Store
-	reactor *Reactor
-	kanban  *KanbanStore
+	// lifetime is the process's context, for work a request starts and does
+	// not wait for.
+	lifetime context.Context
+	store    *Store
+	reactor  *Reactor
+	kanban   *KanbanStore
 }
 
 // RegisterHandlers mounts the API on mux.
-func RegisterHandlers(mux *http.ServeMux, store *Store, reactor *Reactor, kanban *KanbanStore) {
-	s := &Server{store: store, reactor: reactor, kanban: kanban}
+func RegisterHandlers(lifetime context.Context, mux *http.ServeMux, store *Store, reactor *Reactor, kanban *KanbanStore) {
+	s := &Server{lifetime: lifetime, store: store, reactor: reactor, kanban: kanban}
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /vocabulary", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, CurrentVocabulary()) })
 	mux.HandleFunc("GET /rules", s.listRules)
@@ -117,6 +121,8 @@ func (s *Server) activate(w http.ResponseWriter, r *http.Request) {
 	if respondError(w, err) {
 		return
 	}
+	// The request's context ends with the response; the check outlives it.
+	s.reactor.CheckRuleInBackground(s.lifetime, rule.ID)
 	writeJSON(w, http.StatusOK, rule)
 }
 

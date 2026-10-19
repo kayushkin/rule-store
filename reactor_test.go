@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -184,5 +185,40 @@ func TestTheSweepNoticesThatTimeHasPassed(t *testing.T) {
 	runs, _ := s.ListRuns(RunFilter{})
 	if len(runs) != 1 || runs[0].Cause != CauseSweep || runs[0].PlannedEffects[0].Path != "/sessions/quiet/folder" {
 		t.Fatalf("want one sweep run that archives the session, got %+v", runs)
+	}
+}
+
+func TestActivatingARuleChecksSessionsAlreadyInItsState(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.ObserveSubjects([]SubjectObservation{{Type: SubjectTypeSession, ID: "finished-earlier", State: "completed", Snapshot: session("finished-earlier", "completed", "chat", "2026-10-19T09:00:00Z")}}); err != nil {
+		t.Fatal(err)
+	}
+	facts := &fakeFacts{placements: map[string][]CardPlacement{"finished-earlier": {{CardID: "card-9", BoardID: testBoard, ColumnID: testInProgress}}}}
+	reactor := NewReactor(s, nil, facts, time.Hour)
+	mux := http.NewServeMux()
+	RegisterHandlers(context.Background(), mux, s, reactor, nil)
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return recorder
+	}
+	if rec := call("POST", "/rules", `{"name":"close","source":"llm-bridge-server.session","created_by":"principal_000001"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body)
+	}
+	if rec := call("POST", "/rules/rule_000001/revisions", `{"definition":`+curatorDone()+`,"created_by":"principal_000001"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("revision: %d %s", rec.Code, rec.Body)
+	}
+	if rec := call("POST", "/rules/rule_000001/activate", `{"revision":1,"mode":"live","acted_by":"principal_000001","reason":"x"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("live must be a 400: %d", rec.Code)
+	}
+	if rec := call("POST", "/rules/rule_000001/activate", `{"revision":1,"mode":"shadow","acted_by":"principal_000001","reason":"test"}`); rec.Code != http.StatusOK {
+		t.Fatalf("activate: %d %s", rec.Code, rec.Body)
+	}
+	waitFor(t, "the activation check to decide about the session completed before the rule existed", func() bool {
+		runs, _ := s.ListRuns(RunFilter{SubjectID: "finished-earlier"})
+		return len(runs) == 1
+	})
+	if rec := call("GET", "/runs?rule_id=rule_000001", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "card-9") {
+		t.Fatalf("runs: %d %s", rec.Code, rec.Body)
 	}
 }

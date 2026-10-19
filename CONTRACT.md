@@ -96,7 +96,7 @@ rule sweeps it. The comparison's `missed_cards` shows how often that matters.
 | POST | `/rules` | `{name, description?, source, created_by}` → **201**, a draft |
 | GET | `/rules/{id}` | the rule with `revisions` and `activations` |
 | POST | `/rules/{id}/revisions` | `{definition, note?, created_by}` → **201**. Validated; immutable; does not activate. **409** on a retired rule |
-| POST | `/rules/{id}/activate` | `{revision, mode, acted_by, reason}`. `mode` must be `shadow`; `live` is a 400 that says why. Also switches an active rule to another revision |
+| POST | `/rules/{id}/activate` | `{revision, mode, acted_by, reason}`. `mode` must be `shadow`; `live` is a 400 that says why. Also switches an active rule to another revision. Then checks the rule once, in the background, against every session in the states it names, so a rule without a time condition still decides about sessions already in its state |
 | POST | `/rules/{id}/pause` | `{acted_by, reason}`. **409** unless active |
 | POST | `/rules/{id}/retire` | `{acted_by, reason}`. Final |
 | POST | `/rules/{id}/preview` | `{revision}` or `{definition}`, `limit?` (50) → `{candidates, matched, matches:[{subject_id, trigger_key, facts, planned_effects}]}` against every session held now. Records nothing and is not permission. Calls kanban-store for every candidate that passes the cheap conditions, so it can take a while |

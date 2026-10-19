@@ -277,6 +277,39 @@ func (r *Reactor) Sweep(ctx context.Context, onlyTimeRules bool) error {
 	return nil
 }
 
+// CheckRuleInBackground checks one newly activated rule against every session
+// in the states it names, once, so a rule without a time condition still
+// decides about sessions that are already in its state. Called after an
+// activation; waits for any sweep in progress.
+func (r *Reactor) CheckRuleInBackground(ctx context.Context, ruleID string) {
+	go func() {
+		r.sweeping.Lock()
+		defer r.sweeping.Unlock()
+		rules, err := r.store.ActiveRules(SourceSession)
+		if err != nil {
+			r.fail(fmt.Errorf("check newly activated rule %s: %w", ruleID, err))
+			return
+		}
+		for _, rule := range rules {
+			if rule.Rule.ID != ruleID {
+				continue
+			}
+			subjects, err := r.store.SubjectsInStates(SubjectTypeSession, statesNamedBy(rule.Revision.Definition))
+			if err != nil {
+				r.fail(fmt.Errorf("check newly activated rule %s: %w", ruleID, err))
+				return
+			}
+			for _, subject := range subjects {
+				if ctx.Err() != nil {
+					return
+				}
+				r.decide(ctx, rule, subject, CauseSweep)
+			}
+			log.Printf("checked newly activated rule %s against %d sessions", ruleID, len(subjects))
+		}
+	}()
+}
+
 func hasConditionKind(d Definition, kind string) bool {
 	return slices.ContainsFunc(d.Conditions, func(c Condition) bool { return c.Kind == kind })
 }

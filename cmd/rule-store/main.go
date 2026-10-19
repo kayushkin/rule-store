@@ -40,7 +40,7 @@ func main() {
 	go reactor.Run(ctx)
 
 	mux := http.NewServeMux()
-	rulestore.RegisterHandlers(mux, store, reactor, kanban)
+	rulestore.RegisterHandlers(ctx, mux, store, reactor, kanban)
 	rulestore.RegisterSettingsHandler(mux, settings)
 	server := &http.Server{Addr: settings.String(rulestore.SettingListenAddress), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
