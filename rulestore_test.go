@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -212,5 +214,35 @@ func TestUpdatedBeforeAndTagConditions(t *testing.T) {
 	}
 	if len(old.PlannedEffects) != 2 || old.PlannedEffects[1].Path != "/sessions/fresh/send" {
 		t.Fatalf("effects in order: %+v", old.PlannedEffects)
+	}
+}
+
+func TestALinkedCardOnNoBoardHasNoPlacement(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/entities/session/s1/cards":
+			w.Write([]byte(`[{"card_id":"detached"},{"card_id":"placed"}]`))
+		case "/api/cards/detached":
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		case "/api/cards/placed":
+			w.Write([]byte(`{"placements":[{"board_id":"b","column_id":"c"}]}`))
+		case "/api/cards/broken":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusTeapot)
+		}
+	}))
+	defer server.Close()
+	kanban := NewKanbanStore(server.URL, "token")
+	placements, err := kanban.LinkedCardPlacements(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(placements) != 1 || placements[0].CardID != "placed" {
+		t.Fatalf("placements %+v", placements)
+	}
+	var card CardDetail
+	if err := kanban.getJSON(context.Background(), "/api/cards/broken", &card); err == nil || errors.Is(err, errKanbanNotFound) {
+		t.Fatalf("a 500 must stay an error, got %v", err)
 	}
 }

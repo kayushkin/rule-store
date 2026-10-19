@@ -3,6 +3,7 @@ package rulestore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,9 @@ func NewKanbanStore(baseURL, serviceToken string) *KanbanStore {
 	return &KanbanStore{BaseURL: baseURL, ServiceToken: serviceToken, Client: &http.Client{Timeout: 20 * time.Second}}
 }
 
+// errKanbanNotFound is a 404 from kanban-store.
+var errKanbanNotFound = errors.New("kanban-store: not found")
+
 func (k *KanbanStore) getJSON(ctx context.Context, path string, target any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, k.BaseURL+path, nil)
 	if err != nil {
@@ -38,6 +42,9 @@ func (k *KanbanStore) getJSON(ctx context.Context, path string, target any) erro
 	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if err != nil {
 		return err
+	}
+	if response.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: GET %s: %.300s", errKanbanNotFound, path, body)
 	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("kanban-store GET %s: %d %.300s", path, response.StatusCode, body)
@@ -62,7 +69,14 @@ func (k *KanbanStore) LinkedCardPlacements(ctx context.Context, sessionID string
 				ColumnID string `json:"column_id"`
 			} `json:"placements"`
 		}
-		if err := k.getJSON(ctx, "/api/cards/"+url.PathEscape(l.CardID), &card); err != nil {
+		err := k.getJSON(ctx, "/api/cards/"+url.PathEscape(l.CardID), &card)
+		// kanban-store answers 404 for a card that is on no board: linked,
+		// but detached from every board. It sits in no column, so it has no
+		// placement, which is an answer, not a failure.
+		if errors.Is(err, errKanbanNotFound) {
+			continue
+		}
+		if err != nil {
 			return nil, err
 		}
 		for _, p := range card.Placements {
