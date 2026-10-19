@@ -40,7 +40,7 @@ keys, and keys a kind ignores, are a 400.
 
 | Condition | Fields | Holds when |
 |---|---|---|
-| `field_in` / `field_not_in` | `field` (one of `session_fields`), `values` | the session's field is / is not one of the values |
+| `field_in` / `field_not_in` | `field` (one of `session_fields`), `values` | the session's field is / is not one of the values. `status_reason` is `status.reason`: why the state last changed, from llm-bridge's served list (`GET /session-taxonomy` → `state_reasons`) |
 | `updated_before` | `age` (Go duration) | the session's `updated_at` is older than `age` |
 | `session_tag_present` / `session_tag_absent` | `tag` | kanban-store's entity tags on `session/<id>` include / lack it |
 | `linked_card_in_column` | `board_id`, `column_id` | a card linked to the session sits in that column. **Columns are ids, never names** |

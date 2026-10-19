@@ -49,7 +49,10 @@ var ConditionKinds = []string{
 
 // SessionFields is every session field field_in and field_not_in may test.
 // Each is a string llm-bridge-server sets on GET /sessions.
-var SessionFields = []string{"state", "purpose", "folder_name", "harness", "origin", "type"}
+// status_reason is why the state last changed (llm-bridge msg.SessionStateReason,
+// served by GET /session-taxonomy as state_reasons): idle_reaped tells a
+// session whose finished process the reaper stopped from one stopped mid-turn.
+var SessionFields = []string{"state", "purpose", "folder_name", "harness", "origin", "type", "status_reason"}
 
 // Effect kinds.
 const (

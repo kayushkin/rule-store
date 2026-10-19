@@ -40,6 +40,9 @@ type SessionSnapshot struct {
 	Origin     string `json:"origin"`
 	Type       string `json:"type"`
 	UpdatedAt  string `json:"updated_at"`
+	Status     struct {
+		Reason string `json:"reason"`
+	} `json:"status"`
 }
 
 // Field returns one of SessionFields.
@@ -57,6 +60,8 @@ func (s SessionSnapshot) Field(name string) (string, error) {
 		return s.Origin, nil
 	case "type":
 		return s.Type, nil
+	case "status_reason":
+		return s.Status.Reason, nil
 	}
 	return "", fmt.Errorf("session field %q is not one rule-store reads", name)
 }

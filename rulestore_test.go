@@ -246,3 +246,23 @@ func TestALinkedCardOnNoBoardHasNoPlacement(t *testing.T) {
 		t.Fatalf("a 500 must stay an error, got %v", err)
 	}
 }
+
+func TestStatusReasonIsReadFromTheSessionStatus(t *testing.T) {
+	definition, err := ParseDefinition(SourceSession, json.RawMessage(`{"conditions":[
+		{"kind":"field_in","field":"state","values":["completed"]},
+		{"kind":"field_in","field":"status_reason","values":["idle_reaped"]}],
+		"effects":[{"kind":"add_session_tag","tag":"reaped-after-finishing"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reaped := Subject{Type: SubjectTypeSession, ID: "s", State: "completed", StateEpisode: 1,
+		Snapshot: json.RawMessage(`{"session_id":"s","state":"completed","updated_at":"2026-10-19T11:00:00Z","status":{"state":"completed","reason":"idle_reaped"}}`)}
+	marked := Subject{Type: SubjectTypeSession, ID: "s", State: "completed", StateEpisode: 1,
+		Snapshot: json.RawMessage(`{"session_id":"s","state":"completed","updated_at":"2026-10-19T11:00:00Z","status":{"state":"completed","reason":"mark_done_user"}}`)}
+	at := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	first, _ := EvaluateSession(context.Background(), definition, reaped, at, &fakeFacts{})
+	second, _ := EvaluateSession(context.Background(), definition, marked, at, &fakeFacts{})
+	if !first.Matched || second.Matched {
+		t.Fatalf("reaped matched=%v, marked done matched=%v; want true false", first.Matched, second.Matched)
+	}
+}
