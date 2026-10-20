@@ -66,7 +66,7 @@ const comparisonRunLimit = 500
 
 // CompareRule checks a rule's shadow runs since a moment against the owners.
 // since 0 means the rule's first activation.
-func (s *Store) CompareRule(ctx context.Context, ruleID string, since int64, kanban *KanbanStore) (*Comparison, error) {
+func (s *Store) CompareRule(ctx context.Context, ruleID string, since int64, kanban *KanbanStore, bridge *LLMBridge) (*Comparison, error) {
 	rule, err := s.GetRule(ruleID)
 	if err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func (s *Store) CompareRule(ctx context.Context, ruleID string, since int64, kan
 	for _, run := range runs {
 		decidedSessions[run.SubjectID] = true
 		for _, effect := range run.PlannedEffects {
-			check, err := s.checkEffect(ctx, run, effect, kanban)
+			check, err := s.checkEffect(ctx, run, effect, kanban, bridge)
 			if err != nil {
 				return nil, err
 			}
@@ -142,7 +142,7 @@ func (s *Store) CompareRule(ctx context.Context, ruleID string, since int64, kan
 	return report, nil
 }
 
-func (s *Store) checkEffect(ctx context.Context, run Run, effect PlannedEffect, kanban *KanbanStore) (EffectCheck, error) {
+func (s *Store) checkEffect(ctx context.Context, run Run, effect PlannedEffect, kanban *KanbanStore, bridge *LLMBridge) (EffectCheck, error) {
 	check := EffectCheck{RunID: run.ID, SubjectID: run.SubjectID, DecidedAt: run.DecidedAt, Kind: effect.Kind, Path: effect.Path, Checkable: true}
 	body, _ := effect.Body.(map[string]any)
 	switch effect.Kind {
@@ -164,14 +164,16 @@ func (s *Store) checkEffect(ctx context.Context, run Run, effect PlannedEffect, 
 		}
 		check.Reached = slices.Contains(tags, fmt.Sprint(body["tag"]))
 	case EffectMoveSessionToFolder:
-		subject, err := s.GetSubject(SubjectTypeSession, run.SubjectID)
-		if err != nil {
-			check.Checkable, check.Detail = false, "the bridge no longer has the session"
-			return check, nil
-		}
-		session, err := ParseSessionSnapshot(subject.Snapshot)
+		// Asked of the bridge, not rule-store's copy: a bulk move
+		// (POST /admin/archive-old) sends no feed frame, so the copy can
+		// still show the old folder after the session was archived.
+		session, found, err := bridge.GetSession(ctx, run.SubjectID)
 		if err != nil {
 			return check, err
+		}
+		if !found {
+			check.Checkable, check.Detail = false, "the bridge no longer has the session"
+			return check, nil
 		}
 		check.Reached = session.FolderName == fmt.Sprint(body["folder"])
 	default:

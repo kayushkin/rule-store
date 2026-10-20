@@ -241,7 +241,7 @@ func (s *Server) comparison(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	report, err := s.store.CompareRule(r.Context(), r.PathValue("id"), since, s.kanban)
+	report, err := s.store.CompareRule(r.Context(), r.PathValue("id"), since, s.kanban, s.reactor.bridge)
 	if respondError(w, err) {
 		return
 	}

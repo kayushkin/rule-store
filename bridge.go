@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -56,6 +57,32 @@ func (b *LLMBridge) ListSessions(ctx context.Context) ([]json.RawMessage, error)
 		return nil, fmt.Errorf("read GET /sessions: %w", err)
 	}
 	return sessions, nil
+}
+
+// GetSession reads one session from the bridge. found is false on a 404.
+func (b *LLMBridge) GetSession(ctx context.Context, sessionID string) (SessionSnapshot, bool, error) {
+	var session SessionSnapshot
+	request, err := b.request(ctx, "/sessions/"+url.PathEscape(sessionID))
+	if err != nil {
+		return session, false, err
+	}
+	response, err := b.Client.Do(request)
+	if err != nil {
+		return session, false, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return session, false, err
+	}
+	if response.StatusCode == http.StatusNotFound {
+		return session, false, nil
+	}
+	if response.StatusCode != http.StatusOK {
+		return session, false, fmt.Errorf("llm-bridge-server GET /sessions/%s: %d %.300s", sessionID, response.StatusCode, body)
+	}
+	session, err = ParseSessionSnapshot(body)
+	return session, true, err
 }
 
 // FeedHello is the first frame of every connection to /session-events.
