@@ -209,17 +209,10 @@ func missedArrivals(ctx context.Context, kanban *KanbanStore, effect Effect, sin
 		if arrivedAt.Unix() < since {
 			continue
 		}
-		card, err := kanban.Card(ctx, arrival.CardID)
-		if err != nil {
-			return nil, err
-		}
-		var sessions []string
+		sessions := arrival.SessionIDs
 		covered := false
-		for _, link := range card.Links {
-			if link.EntityType == SubjectTypeSession {
-				sessions = append(sessions, link.EntityRef)
-				covered = covered || decidedSessions[link.EntityRef]
-			}
+		for _, sessionID := range sessions {
+			covered = covered || decidedSessions[sessionID]
 		}
 		if len(sessions) > 0 && !covered {
 			missed = append(missed, MissedArrival{CardID: arrival.CardID, ToColumnID: effect.ToColumnID, ArrivedAt: arrival.ArrivedAt, SessionIDs: sessions})

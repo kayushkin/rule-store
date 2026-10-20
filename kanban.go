@@ -25,6 +25,11 @@ func NewKanbanStore(baseURL, serviceToken string) *KanbanStore {
 	return &KanbanStore{BaseURL: baseURL, ServiceToken: serviceToken, Client: &http.Client{Timeout: 20 * time.Second}}
 }
 
+// kanbanResponseLimit bounds one kanban-store response. A whole board's view
+// is past it (the Agent runs board was 21 MB on 2026-10-20), which is why a
+// column is read a page at a time.
+const kanbanResponseLimit = 8 << 20
+
 // errKanbanNotFound is a 404 from kanban-store.
 var errKanbanNotFound = errors.New("kanban-store: not found")
 
@@ -39,9 +44,14 @@ func (k *KanbanStore) getJSON(ctx context.Context, path string, target any) erro
 		return err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(response.Body, kanbanResponseLimit+1))
 	if err != nil {
 		return err
+	}
+	// A body cut at the limit would fail to parse with "unexpected end of
+	// JSON input", which names the wrong problem. Say what it is.
+	if len(body) > kanbanResponseLimit {
+		return fmt.Errorf("kanban-store GET %s: response is larger than %d MB; read it in pages", path, kanbanResponseLimit>>20)
 	}
 	if response.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w: GET %s: %.300s", errKanbanNotFound, path, body)
@@ -126,20 +136,28 @@ func (k *KanbanStore) Card(ctx context.Context, cardID string) (CardDetail, erro
 	return card, err
 }
 
-// ColumnArrival is a card in a column, and when it arrived there.
+// ColumnArrival is a card in a column, when it arrived there, and the
+// sessions linked to it.
 type ColumnArrival struct {
-	CardID    string `json:"card_id"`
-	ArrivedAt string `json:"arrived_at"`
+	CardID     string   `json:"card_id"`
+	ArrivedAt  string   `json:"arrived_at"`
+	SessionIDs []string `json:"session_ids"`
 }
 
-// ColumnCards lists every card in one column of a board, with no limit, so a
-// comparison counts every card the old binary moved there.
+// columnPageSize is how many cards one column read asks for.
+const columnPageSize = 500
+
+// ColumnCards lists every card in one column, a page at a time, so a
+// comparison counts every card the old binary moved there without reading the
+// whole board.
 func (k *KanbanStore) ColumnCards(ctx context.Context, boardID, columnID string) ([]ColumnArrival, error) {
-	var view struct {
-		Columns []struct {
+	arrivals := []ColumnArrival{}
+	for offset := 0; ; offset += columnPageSize {
+		var page struct {
 			Column struct {
-				ID string `json:"id"`
+				BoardID string `json:"board_id"`
 			} `json:"column"`
+			Total int `json:"total"`
 			Cards []struct {
 				Item struct {
 					ID string `json:"id"`
@@ -147,21 +165,30 @@ func (k *KanbanStore) ColumnCards(ctx context.Context, boardID, columnID string)
 				Placement struct {
 					UpdatedAt string `json:"updated_at"`
 				} `json:"placement"`
+				Links []struct {
+					EntityType string `json:"entity_type"`
+					EntityRef  string `json:"entity_ref"`
+				} `json:"links"`
 			} `json:"cards"`
-		} `json:"columns"`
-	}
-	if err := k.getJSON(ctx, "/api/boards/"+url.PathEscape(boardID)+"/cards", &view); err != nil {
-		return nil, err
-	}
-	for _, column := range view.Columns {
-		if column.Column.ID != columnID {
-			continue
 		}
-		arrivals := make([]ColumnArrival, 0, len(column.Cards))
-		for _, card := range column.Cards {
-			arrivals = append(arrivals, ColumnArrival{CardID: card.Item.ID, ArrivedAt: card.Placement.UpdatedAt})
+		path := fmt.Sprintf("/api/columns/%s/cards?limit=%d&offset=%d", url.PathEscape(columnID), columnPageSize, offset)
+		if err := k.getJSON(ctx, path, &page); err != nil {
+			return nil, err
 		}
-		return arrivals, nil
+		if page.Column.BoardID != boardID {
+			return nil, fmt.Errorf("column %s is on board %s, not %s", columnID, page.Column.BoardID, boardID)
+		}
+		for _, card := range page.Cards {
+			arrival := ColumnArrival{CardID: card.Item.ID, ArrivedAt: card.Placement.UpdatedAt, SessionIDs: []string{}}
+			for _, link := range card.Links {
+				if link.EntityType == SubjectTypeSession {
+					arrival.SessionIDs = append(arrival.SessionIDs, link.EntityRef)
+				}
+			}
+			arrivals = append(arrivals, arrival)
+		}
+		if len(page.Cards) == 0 || offset+len(page.Cards) >= page.Total {
+			return arrivals, nil
+		}
 	}
-	return nil, fmt.Errorf("board %s has no column %s", boardID, columnID)
 }

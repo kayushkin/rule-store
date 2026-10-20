@@ -266,3 +266,36 @@ func TestStatusReasonIsReadFromTheSessionStatus(t *testing.T) {
 		t.Fatalf("reaped matched=%v, marked done matched=%v; want true false", first.Matched, second.Matched)
 	}
 }
+
+func TestColumnCardsReadsEveryPageAndRefusesAnOversizedBody(t *testing.T) {
+	served := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/columns/col/cards":
+			served++
+			offset := r.URL.Query().Get("offset")
+			cards := `[{"item":{"id":"a"},"placement":{"updated_at":"2026-10-20T10:00:00Z"},"links":[{"entity_type":"session","entity_ref":"s1"},{"entity_type":"email","entity_ref":"x"}]}]`
+			if offset != "0" {
+				cards = `[{"item":{"id":"b"},"placement":{"updated_at":"2026-10-20T11:00:00Z"},"links":[]}]`
+			}
+			fmt.Fprintf(w, `{"column":{"board_id":"board"},"total":%d,"cards":%s}`, columnPageSize+1, cards)
+		case "/api/cards/huge":
+			w.Write([]byte(`{"pad":"` + strings.Repeat("x", kanbanResponseLimit) + `"}`))
+		}
+	}))
+	defer server.Close()
+	kanban := NewKanbanStore(server.URL, "token")
+	arrivals, err := kanban.ColumnCards(context.Background(), "board", "col")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arrivals) != 2 || served != 2 || len(arrivals[0].SessionIDs) != 1 || arrivals[0].SessionIDs[0] != "s1" {
+		t.Fatalf("arrivals %+v after %d pages", arrivals, served)
+	}
+	if _, err := kanban.ColumnCards(context.Background(), "another-board", "col"); err == nil {
+		t.Fatal("a column on another board must be refused")
+	}
+	if _, err := kanban.Card(context.Background(), "huge"); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("an oversized body must say so, got %v", err)
+	}
+}
