@@ -3,7 +3,9 @@ package rulestore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,7 +98,7 @@ func TestTheReactorDecidesOncePerStateEntryFromTheSeedAndTheFeed(t *testing.T) {
 		"already-done": {{CardID: "card-1", BoardID: testBoard, ColumnID: testInProgress}},
 		"running":      {{CardID: "card-2", BoardID: testBoard, ColumnID: testInProgress}},
 	}}
-	reactor := NewReactor(s, NewLLMBridge(server.URL, "synthetic-token"), facts, time.Hour)
+	reactor := NewReactor(s, NewLLMBridge(server.URL, "synthetic-token"), facts, &fakeCaller{}, time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go reactor.Run(ctx)
@@ -172,7 +174,7 @@ func TestTheSweepNoticesThatTimeHasPassed(t *testing.T) {
 	if _, err := s.ObserveSubjects([]SubjectObservation{{Type: SubjectTypeSession, ID: "quiet", State: "idle", Snapshot: session("quiet", "idle", "chat", "2026-10-19T09:00:00Z")}}); err != nil {
 		t.Fatal(err)
 	}
-	reactor := NewReactor(s, nil, &fakeFacts{}, time.Hour)
+	reactor := NewReactor(s, nil, &fakeFacts{}, &fakeCaller{}, time.Hour)
 	reactor.clock = func() time.Time { return time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC) }
 	if err := reactor.Sweep(context.Background(), true); err != nil {
 		t.Fatal(err)
@@ -199,7 +201,7 @@ func TestActivatingARuleChecksSessionsAlreadyInItsState(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts := &fakeFacts{placements: map[string][]CardPlacement{"finished-earlier": {{CardID: "card-9", BoardID: testBoard, ColumnID: testInProgress}}}}
-	reactor := NewReactor(s, nil, facts, time.Hour)
+	reactor := NewReactor(s, nil, facts, &fakeCaller{}, time.Hour)
 	mux := http.NewServeMux()
 	RegisterHandlers(context.Background(), mux, s, reactor, nil)
 	call := func(method, path, body string) *httptest.ResponseRecorder {
@@ -213,8 +215,8 @@ func TestActivatingARuleChecksSessionsAlreadyInItsState(t *testing.T) {
 	if rec := call("POST", "/rules/rule_000001/revisions", `{"definition":`+curatorDone()+`,"created_by":"principal_000001"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("revision: %d %s", rec.Code, rec.Body)
 	}
-	if rec := call("POST", "/rules/rule_000001/activate", `{"revision":1,"mode":"live","acted_by":"principal_000001","reason":"x"}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("live must be a 400: %d", rec.Code)
+	if rec := call("POST", "/rules/rule_000001/activate", `{"revision":1,"mode":"loud","acted_by":"principal_000001","reason":"x"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("an unknown mode must be a 400: %d", rec.Code)
 	}
 	if rec := call("POST", "/rules/rule_000001/activate", `{"revision":1,"mode":"shadow","acted_by":"principal_000001","reason":"test"}`); rec.Code != http.StatusOK {
 		t.Fatalf("activate: %d %s", rec.Code, rec.Body)
@@ -234,7 +236,7 @@ func TestActivityAndSummaryShowWhatTheReactorDid(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts := &fakeFacts{placements: map[string][]CardPlacement{"done": {{CardID: "card-1", BoardID: testBoard, ColumnID: testInProgress}}}}
-	reactor := NewReactor(s, nil, facts, time.Hour)
+	reactor := NewReactor(s, nil, facts, &fakeCaller{}, time.Hour)
 	mux := http.NewServeMux()
 	RegisterHandlers(context.Background(), mux, s, reactor, nil)
 	call := func(method, path, body string) *httptest.ResponseRecorder {
@@ -277,5 +279,131 @@ func TestActivityAndSummaryShowWhatTheReactorDid(t *testing.T) {
 	rec = call("GET", "/summary", "")
 	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil || len(summary.Rules) != 1 || summary.Rules[0].RunsTotal != 1 || summary.Rules[0].RunsLast24h != 1 || len(summary.Rules[0].Revisions) != 1 {
 		t.Fatalf("summary: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// fakeCaller is the owners, answering every call with status, and recording
+// what was called.
+type fakeCaller struct {
+	mu     sync.Mutex
+	status int
+	calls  []PlannedEffect
+}
+
+func (f *fakeCaller) Call(_ context.Context, effect PlannedEffect) EffectResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, effect)
+	status := f.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return EffectResult{Status: status, Body: `{}`, CalledAt: 1}
+}
+
+func liveRule(t *testing.T, s *Store, definition string) {
+	t.Helper()
+	rule, err := s.CreateRule("live rule", "", SourceSession, testAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddRevision(rule.ID, json.RawMessage(definition), "", testAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Activate(rule.ID, 1, ModeLive, testAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestALiveRuleMakesItsCallsOnceAndRecordsTheAnswers(t *testing.T) {
+	s := newTestStore(t)
+	liveRule(t, s, `{"conditions":[{"kind":"field_in","field":"state","values":["completed"]}],
+		"effects":[{"kind":"add_session_tag","tag":"done"},{"kind":"send_session_message","text":"thanks"}]}`)
+	subjects, err := s.ObserveSubjects([]SubjectObservation{{Type: SubjectTypeSession, ID: "s1", State: "completed", Snapshot: session("s1", "completed", "chat", "2026-10-20T09:00:00Z")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := &fakeCaller{}
+	reactor := NewReactor(s, nil, &fakeFacts{}, caller, time.Hour)
+	rules, _ := s.ActiveRules(SourceSession)
+	reactor.decide(context.Background(), rules[0], subjects[0], CauseFeed)
+	reactor.decide(context.Background(), rules[0], subjects[0], CauseSweep)
+
+	if len(caller.calls) != 2 {
+		t.Fatalf("a live run calls each effect once, and a second decision calls nothing: %d calls", len(caller.calls))
+	}
+	if caller.calls[1].Body.(map[string]any)["client_request_id"] == nil {
+		t.Fatal("a live send must carry its client_request_id")
+	}
+	runs, _ := s.ListRuns(RunFilter{})
+	if len(runs) != 1 || runs[0].Outcome != OutcomeApplied || runs[0].Mode != ModeLive {
+		t.Fatalf("runs %+v", runs)
+	}
+	for _, effect := range runs[0].PlannedEffects {
+		if effect.Result == nil || effect.Result.Status != http.StatusOK {
+			t.Fatalf("every answer is recorded on the run: %+v", effect)
+		}
+	}
+}
+
+func TestALiveRunStopsAtTheFirstRefusalAndSaysSo(t *testing.T) {
+	s := newTestStore(t)
+	liveRule(t, s, `{"conditions":[{"kind":"field_in","field":"state","values":["completed"]}],
+		"effects":[{"kind":"add_session_tag","tag":"a"},{"kind":"add_session_tag","tag":"b"}]}`)
+	subjects, _ := s.ObserveSubjects([]SubjectObservation{{Type: SubjectTypeSession, ID: "s1", State: "completed", Snapshot: session("s1", "completed", "chat", "2026-10-20T09:00:00Z")}})
+	caller := &fakeCaller{status: http.StatusConflict}
+	reactor := NewReactor(s, nil, &fakeFacts{}, caller, time.Hour)
+	rules, _ := s.ActiveRules(SourceSession)
+	reactor.decide(context.Background(), rules[0], subjects[0], CauseFeed)
+
+	if len(caller.calls) != 1 {
+		t.Fatalf("calls after a refusal must not be made: %d", len(caller.calls))
+	}
+	runs, _ := s.ListRuns(RunFilter{})
+	if runs[0].Outcome != OutcomeFailed || runs[0].PlannedEffects[0].Result.Status != http.StatusConflict || runs[0].PlannedEffects[1].Result != nil {
+		t.Fatalf("run %+v", runs[0])
+	}
+	if status := reactor.Status(); status.ErrorsSinceBoot != 1 || !strings.Contains(status.LastError, "409") {
+		t.Fatalf("a refused call is an error on /health: %+v", status)
+	}
+}
+
+func TestARunLeftApplyingIsMarkedInterruptedNotRepeated(t *testing.T) {
+	s := newTestStore(t)
+	liveRule(t, s, `{"conditions":[{"kind":"field_in","field":"state","values":["completed"]}],"effects":[{"kind":"add_session_tag","tag":"a"}]}`)
+	rules, _ := s.ActiveRules(SourceSession)
+	run := &Run{RuleID: rules[0].Rule.ID, RuleRevisionID: rules[0].Revision.ID, SubjectType: SubjectTypeSession, SubjectID: "s1",
+		TriggerKey: "completed#1", Mode: ModeLive, Cause: CauseFeed, Facts: json.RawMessage(`{}`), Outcome: OutcomeApplying, DecidedAt: 1}
+	if err := s.RecordRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.MarkInterruptedRuns(); err != nil || n != 1 {
+		t.Fatalf("marked %d, %v", n, err)
+	}
+	if err := s.FinishRun(run.ID, OutcomeApplied, nil); !errors.Is(err, ErrConflict) {
+		t.Fatalf("an interrupted run cannot be finished as applied: %v", err)
+	}
+}
+
+func TestOwnerCallsSendTheTokenAndBodyAndKeepTheAnswer(t *testing.T) {
+	var gotToken, gotBody, gotType string
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken, gotType = r.Header.Get("X-Kanban-Store-Service-Token"), r.Header.Get("Content-Type")
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"tag":"x"}`))
+	}))
+	defer owner.Close()
+	calls := NewOwnerCalls(NewLLMBridge("http://unused", "b"), NewKanbanStore(owner.URL, "kanban-token"))
+	result := calls.Call(context.Background(), PlannedEffect{Service: "kanban-store", Method: "POST", Path: "/api/entities/session/s1/tags", Body: map[string]any{"tag": "x"}})
+	if !result.accepted() || result.Status != http.StatusCreated || result.Body != `{"tag":"x"}` {
+		t.Fatalf("result %+v", result)
+	}
+	if gotToken != "kanban-token" || gotBody != `{"tag":"x"}` || gotType != "application/json" {
+		t.Fatalf("token %q body %q type %q", gotToken, gotBody, gotType)
+	}
+	if unknown := calls.Call(context.Background(), PlannedEffect{Service: "mailstack", Method: "POST", Path: "/x"}); unknown.accepted() || unknown.Error == "" {
+		t.Fatalf("an unknown service must not be called: %+v", unknown)
 	}
 }

@@ -32,6 +32,7 @@ import (
 // decided.
 type Reactor struct {
 	store         *Store
+	caller        EffectCaller
 	bridge        *LLMBridge
 	facts         SessionFacts
 	sweepInterval time.Duration
@@ -67,8 +68,8 @@ type ReactorStatus struct {
 }
 
 // NewReactor builds a reactor. Run starts it.
-func NewReactor(store *Store, bridge *LLMBridge, facts SessionFacts, sweepInterval time.Duration) *Reactor {
-	return &Reactor{store: store, bridge: bridge, facts: facts, sweepInterval: sweepInterval, clock: time.Now,
+func NewReactor(store *Store, bridge *LLMBridge, facts SessionFacts, caller EffectCaller, sweepInterval time.Duration) *Reactor {
+	return &Reactor{store: store, bridge: bridge, facts: facts, caller: caller, sweepInterval: sweepInterval, clock: time.Now,
 		changed: map[string]bool{}, wake: make(chan struct{}, 1), status: ReactorStatus{UnknownFrames: map[string]int{}}}
 }
 
@@ -406,6 +407,9 @@ func (r *Reactor) decide(ctx context.Context, rule ActiveRule, subject Subject, 
 	run := &Run{RuleID: rule.Rule.ID, RuleRevisionID: rule.Revision.ID, SubjectType: subject.Type, SubjectID: subject.ID,
 		TriggerKey: triggerKey, Mode: rule.Rule.Mode, Cause: cause, Facts: facts, PlannedEffects: decision.PlannedEffects,
 		Outcome: OutcomeShadowed, DecidedAt: r.clock().Unix()}
+	if rule.Rule.Mode == ModeLive {
+		run.Outcome = OutcomeApplying
+	}
 	if err := r.store.RecordRun(run); err != nil {
 		if errors.Is(err, ErrConflict) {
 			return
@@ -416,6 +420,46 @@ func (r *Reactor) decide(ctx context.Context, rule ActiveRule, subject Subject, 
 	r.mu.Lock()
 	r.status.RunsRecorded++
 	r.mu.Unlock()
+	if run.Outcome == OutcomeApplying {
+		r.apply(ctx, rule, subject, run)
+		return
+	}
 	r.activity.add(Activity{Kind: ActivityRun, RuleID: rule.Rule.ID, RunID: run.ID, Subject: subject.ID,
 		Message: fmt.Sprintf("%s matched %s at %s (%s): %d planned effects, shadowed", rule.Rule.ID, subject.ID, triggerKey, cause, len(run.PlannedEffects))})
+}
+
+// apply makes a live run's calls in order, stopping at the first an owner
+// refuses, and records every answer on the run.
+func (r *Reactor) apply(ctx context.Context, rule ActiveRule, subject Subject, run *Run) {
+	outcome := OutcomeApplied
+	made := 0
+	for i := range run.PlannedEffects {
+		result := r.caller.Call(ctx, run.PlannedEffects[i])
+		run.PlannedEffects[i].Result = &result
+		made++
+		if !result.accepted() {
+			outcome = OutcomeFailed
+			break
+		}
+	}
+	if err := r.store.FinishRun(run.ID, outcome, run.PlannedEffects); err != nil {
+		r.fail(fmt.Errorf("record the outcome of live run %s (%s after %d calls): %w", run.ID, outcome, made, err))
+		return
+	}
+	message := fmt.Sprintf("%s acted on %s at %s: %d of %d calls made, %s", rule.Rule.ID, subject.ID, run.TriggerKey, made, len(run.PlannedEffects), outcome)
+	if outcome == OutcomeFailed {
+		last := run.PlannedEffects[made-1]
+		r.fail(fmt.Errorf("%s — %s %s %s answered %d %s%s", message, last.Method, last.Service, last.Path, last.Result.Status, last.Result.Error, truncateForLog(last.Result.Body)))
+	}
+	r.activity.add(Activity{Kind: ActivityRun, RuleID: rule.Rule.ID, RunID: run.ID, Subject: subject.ID, Message: message})
+}
+
+func truncateForLog(body string) string {
+	if len(body) > 300 {
+		return " " + body[:300] + "…"
+	}
+	if body == "" {
+		return ""
+	}
+	return " " + body
 }

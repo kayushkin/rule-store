@@ -14,8 +14,52 @@ const (
 	CauseSweep = "sweep"
 )
 
-// OutcomeShadowed is a match whose effects were recorded and not called.
-const OutcomeShadowed = "shadowed"
+// Run outcomes.
+const (
+	// OutcomeShadowed is a shadow match: effects recorded, not called.
+	OutcomeShadowed = "shadowed"
+	// OutcomeApplying is a live match whose calls are being made. It is
+	// written before the first call, so the run's uniqueness stops a second
+	// decision from calling again.
+	OutcomeApplying = "applying"
+	// OutcomeApplied is a live match whose every call the owner accepted.
+	OutcomeApplied = "applied"
+	// OutcomeFailed is a live match an owner refused, or that got no answer.
+	// Calls after the failed one were not made. Nothing retries it.
+	OutcomeFailed = "failed"
+	// OutcomeInterrupted is a live match that was applying when rule-store
+	// stopped. Some calls may have been made; the run says which answered.
+	OutcomeInterrupted = "interrupted"
+)
+
+// Outcomes is every outcome a run can have.
+var Outcomes = []string{OutcomeShadowed, OutcomeApplying, OutcomeApplied, OutcomeFailed, OutcomeInterrupted}
+
+// FinishRun records a live run's outcome and the owners' answers.
+func (s *Store) FinishRun(runID, outcome string, effects []PlannedEffect) error {
+	planned, err := json.Marshal(effects)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.Exec(`UPDATE rule_runs SET outcome = ?, planned_effects = ? WHERE id = ? AND outcome = ?`,
+		outcome, string(planned), runID, OutcomeApplying)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return fmt.Errorf("%w: run %s is not applying", ErrConflict, runID)
+	}
+	return nil
+}
+
+// MarkInterruptedRuns marks every run left applying by a stopped process.
+func (s *Store) MarkInterruptedRuns() (int64, error) {
+	result, err := s.db.Exec(`UPDATE rule_runs SET outcome = ? WHERE outcome = ?`, OutcomeInterrupted, OutcomeApplying)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
 
 // Run is one rule revision's decision about one subject in one state episode.
 type Run struct {

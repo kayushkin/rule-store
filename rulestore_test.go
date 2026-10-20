@@ -60,7 +60,7 @@ func TestADefinitionOutsideTheVocabularyIsRefused(t *testing.T) {
 	}
 }
 
-func TestARuleIsActivatedOnlyInShadowWithAReasonAndRetiringIsFinal(t *testing.T) {
+func TestARuleIsActivatedInAKnownModeWithAReasonAndRetiringIsFinal(t *testing.T) {
 	s := newTestStore(t)
 	rule, err := s.CreateRule("close completed cards", "", SourceSession, testAdmin)
 	if err != nil {
@@ -75,8 +75,8 @@ func TestARuleIsActivatedOnlyInShadowWithAReasonAndRetiringIsFinal(t *testing.T)
 	if _, err := s.AddRevision(rule.ID, json.RawMessage(curatorDone()), "first", testAdmin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Activate(rule.ID, 1, "live", testAdmin, "go"); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "live mode is not built") {
-		t.Fatalf("live mode must be refused and say why, got %v", err)
+	if _, err := s.Activate(rule.ID, 1, "loud", testAdmin, "go"); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "shadow, live") {
+		t.Fatalf("an unknown mode must be refused naming the modes, got %v", err)
 	}
 	if _, err := s.Activate(rule.ID, 1, ModeShadow, testAdmin, ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("an activation without a reason must be refused, got %v", err)

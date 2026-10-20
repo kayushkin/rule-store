@@ -32,6 +32,16 @@ type PlannedEffect struct {
 	Method  string `json:"method"`
 	Path    string `json:"path"`
 	Body    any    `json:"body,omitempty"`
+	// Result is what the owner answered, on a live run only.
+	Result *EffectResult `json:"result,omitempty"`
+}
+
+// EffectResult is the owner's answer to one effect's call, kept as it came.
+type EffectResult struct {
+	Status   int    `json:"status"`
+	Body     string `json:"body"`
+	Error    string `json:"error,omitempty"` // the call never got an answer
+	CalledAt int64  `json:"called_at"`
 }
 
 // Decision is what evaluating one revision against one subject found.

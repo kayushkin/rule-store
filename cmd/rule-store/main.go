@@ -33,7 +33,14 @@ func main() {
 
 	bridge := rulestore.NewLLMBridge(settings.String(rulestore.SettingLLMBridgeURL), settings.String(rulestore.SettingLLMBridgeServiceToken))
 	kanban := rulestore.NewKanbanStore(settings.String(rulestore.SettingKanbanStoreURL), settings.String(rulestore.SettingKanbanStoreServiceToken))
-	reactor := rulestore.NewReactor(store, bridge, kanban, settings.Duration(rulestore.SettingSweepInterval))
+	// A live run left applying by the last process stopped mid-way. Its calls
+	// are not made again: the run says which answered, and a person decides.
+	if interrupted, err := store.MarkInterruptedRuns(); err != nil {
+		log.Fatalf("mark interrupted runs: %v", err)
+	} else if interrupted > 0 {
+		log.Printf("marked %d live runs interrupted: they were applying when the last process stopped", interrupted)
+	}
+	reactor := rulestore.NewReactor(store, bridge, kanban, rulestore.NewOwnerCalls(bridge, kanban), settings.Duration(rulestore.SettingSweepInterval))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -12,7 +12,7 @@ On 2026-10-19 the rules that react to sessions lived as hardcoded Go in polling 
 
 ## Shadow first
 
-**Every rule runs in shadow mode: a match records the exact owner calls its effects would make, and nothing is called.** Live mode is not built. Build it only after `GET /rules/{id}/comparison` shows a rule agrees with the binary it replaces, and switch that binary off in the same change that turns its rule live, so two writers never act on one card.
+**A rule runs in shadow mode (records the calls its effects would make, makes none) or live mode (makes them, with every owner's answer kept on the run).** A live match is written as `applying` before its first call, so it cannot be applied twice; it ends `applied` or `failed` at the first refusal, with no retry, and a run caught mid-way by a restart is marked `interrupted`, never re-run. Switch a rule to live only after `GET /rules/{id}/comparison` agrees with the job it replaces, and turn that job off in the same sitting, so two writers never act on one card.
 
 ## What stays out
 

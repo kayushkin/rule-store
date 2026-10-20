@@ -14,10 +14,7 @@ and every decision they made. It owns no subject — sessions stay in
 llm-bridge-server and cards in kanban-store — and it keeps no clock: the
 scheduler keeps cron.
 
-**Every rule runs in shadow mode.** A match records the exact owner calls its
-effects would make, and nothing is called. Live mode is not built: it waits
-until shadow runs have been compared with the binaries they replace
-(`GET /rules/{id}/comparison`).
+**A rule runs in shadow or live mode.** A shadow match records the exact owner calls its effects would make and makes none. A live match is recorded as `applying` **before** its first call — so the run's uniqueness stops any second decision from calling again — then makes the calls in order with the service tokens, records each owner's answer on the run (`planned_effects[].result`: `status`, `body` cut at 16 KB, `error` when no answer came), and ends `applied`, or `failed` at the first answer outside 2xx; calls after it are not made and nothing retries. A run still `applying` when the process stops is marked `interrupted` at the next start and never re-run. Switch a rule to live only after `GET /rules/{id}/comparison` agrees with the job it replaces, and turn that job off in the same sitting.
 
 ## What stays out
 
@@ -98,7 +95,7 @@ rule sweeps it. The comparison's `missed_cards` shows how often that matters.
 | POST | `/rules` | `{name, description?, source, created_by}` → **201**, a draft |
 | GET | `/rules/{id}` | the rule with `revisions` and `activations` |
 | POST | `/rules/{id}/revisions` | `{definition, note?, created_by}` → **201**. Validated; immutable; does not activate. **409** on a retired rule |
-| POST | `/rules/{id}/activate` | `{revision, mode, acted_by, reason}`. `mode` must be `shadow`; `live` is a 400 that says why. Also switches an active rule to another revision. Then checks the rule once, in the background, against every session in the states it names, so a rule without a time condition still decides about sessions already in its state |
+| POST | `/rules/{id}/activate` | `{revision, mode, acted_by, reason}`. `mode` is `shadow` or `live`. Also switches an active rule to another revision. Then checks the rule once, in the background, against every session in the states it names, so a rule without a time condition still decides about sessions already in its state |
 | POST | `/rules/{id}/pause` | `{acted_by, reason}`. **409** unless active |
 | POST | `/rules/{id}/retire` | `{acted_by, reason}`. Final |
 | POST | `/rules/{id}/preview` | `{revision}` or `{definition}`, `limit?` (50) → `{candidates, matched, matches:[{subject_id, trigger_key, facts, planned_effects}]}` against every session held now. Records nothing and is not permission. Calls kanban-store for every candidate that passes the cheap conditions, so it can take a while |

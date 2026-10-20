@@ -65,12 +65,17 @@ const (
 // EffectKinds is every effect kind, served at GET /vocabulary.
 var EffectKinds = []string{EffectMoveLinkedCards, EffectAddSessionTag, EffectSendSessionMessage, EffectMoveSessionToFolder}
 
-// Modes. Only shadow exists: live mode is not built until shadow runs have
-// been compared with what the replaced binaries did.
-const ModeShadow = "shadow"
+// Modes. A shadow rule records the calls its effects would make and makes
+// none. A live rule makes them. Switch a rule to live only after its
+// comparison agrees with the job it replaces, and turn that job off in the
+// same sitting, so two writers never act on one card or session.
+const (
+	ModeShadow = "shadow"
+	ModeLive   = "live"
+)
 
 // Modes is every mode a rule can be activated in.
-var Modes = []string{ModeShadow}
+var Modes = []string{ModeShadow, ModeLive}
 
 // Condition is one test. Kind decides which other fields mean anything.
 type Condition struct {

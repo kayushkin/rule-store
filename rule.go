@@ -261,7 +261,7 @@ func (s *Store) activationsOf(ruleID string) ([]RuleActivation, error) {
 // to read the log needs to know why this text started deciding.
 func (s *Store) Activate(ruleID string, revisionNumber int, mode, actedBy, reason string) (*Rule, error) {
 	if err := oneOf(mode, Modes, "mode"); err != nil {
-		return nil, fmt.Errorf("%w (live mode is not built: it waits until shadow runs have been compared with the binaries the rules replace)", err)
+		return nil, err
 	}
 	var revisionID string
 	err := s.db.QueryRow(`SELECT id FROM rule_revisions WHERE rule_id = ? AND revision = ?`, ruleID, revisionNumber).Scan(&revisionID)
