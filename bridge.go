@@ -70,6 +70,8 @@ type FeedHandler struct {
 	Hello  func(FeedHello) error
 	Upsert func(session json.RawMessage) error
 	Delete func(sessionID string) error
+	// Unknown is told about a frame type this reader does not handle.
+	Unknown func(event string) error
 }
 
 // FollowSessions reads /session-events until the stream ends or a handler
@@ -153,8 +155,14 @@ func dispatchFrame(event, data string, handler FeedHandler) error {
 			return fmt.Errorf("read delete frame %.200s: %v", data, err)
 		}
 		return handler.Delete(frame.SessionID)
+	case "signal":
+		// A session's open questions or notifications changed. Not a change
+		// to the session row, so there is nothing to decide.
+		return nil
 	}
-	// A frame type this reader does not know is new upstream; saying so is
-	// better than acting on it.
-	return fmt.Errorf("feed sent an unknown event %q", event)
+	// A frame type this reader does not know is new upstream. Dropping the
+	// connection over it would reconnect, meet it again and loop — which is
+	// what happened when the "signal" frame was first met on 2026-10-20, 11,201
+	// times. So it is skipped, and counted and named in GET /health.
+	return handler.Unknown(event)
 }

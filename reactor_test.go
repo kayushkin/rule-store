@@ -137,13 +137,18 @@ func TestTheReactorDecidesOncePerStateEntryFromTheSeedAndTheFeed(t *testing.T) {
 		t.Fatal("a deleted session must be forgotten")
 	}
 
+	// A signal frame and a frame type nobody knows yet: neither drops the
+	// feed, and the unknown one is counted.
+	bridgeState.frames <- "event: signal\ndata: {\"type\":\"signal\",\"session_id\":\"running\"}\n\n"
+	bridgeState.frames <- "event: brand_new\ndata: {}\n\n"
+
 	// Resumed and completed again: a new episode, so a new decision.
 	bridgeState.frames <- upsertFrame(session("running", "model_generating", "chat", "2026-10-19T09:10:00Z"))
 	bridgeState.frames <- upsertFrame(session("running", "completed", "chat", "2026-10-19T09:20:00Z"))
 	waitFor(t, "a second decision after the session completed again", func() bool { return len(runsFor("running")) == 2 })
 
 	status := reactor.Status()
-	if !status.FeedConnected || status.LastSeedCount != 3 || status.ErrorsSinceBoot != 0 {
+	if !status.FeedConnected || status.LastSeedCount != 3 || status.ErrorsSinceBoot != 0 || status.UnknownFrames["brand_new"] != 1 || status.UnknownFrames["signal"] != 0 {
 		t.Fatalf("status %+v", status)
 	}
 }
@@ -220,5 +225,57 @@ func TestActivatingARuleChecksSessionsAlreadyInItsState(t *testing.T) {
 	})
 	if rec := call("GET", "/runs?rule_id=rule_000001", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "card-9") {
 		t.Fatalf("runs: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestActivityAndSummaryShowWhatTheReactorDid(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.ObserveSubjects([]SubjectObservation{{Type: SubjectTypeSession, ID: "done", State: "completed", Snapshot: session("done", "completed", "chat", "2026-10-19T09:00:00Z")}}); err != nil {
+		t.Fatal(err)
+	}
+	facts := &fakeFacts{placements: map[string][]CardPlacement{"done": {{CardID: "card-1", BoardID: testBoard, ColumnID: testInProgress}}}}
+	reactor := NewReactor(s, nil, facts, time.Hour)
+	mux := http.NewServeMux()
+	RegisterHandlers(context.Background(), mux, s, reactor, nil)
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return recorder
+	}
+	call("POST", "/rules", `{"name":"close","source":"llm-bridge-server.session","created_by":"principal_000001"}`)
+	call("POST", "/rules/rule_000001/revisions", `{"definition":`+curatorDone()+`,"created_by":"principal_000001"}`)
+	call("POST", "/rules/rule_000001/activate", `{"revision":1,"mode":"shadow","acted_by":"principal_000001","reason":"test"}`)
+	waitFor(t, "the activation check", func() bool { runs, _ := s.ListRuns(RunFilter{}); return len(runs) == 1 })
+	if err := func() error {
+		reactor.sweeping.Lock()
+		defer reactor.sweeping.Unlock()
+		return reactor.Sweep(context.Background(), false)
+	}(); err != nil {
+		t.Fatal(err)
+	}
+
+	var activity []Activity
+	rec := call("GET", "/activity", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &activity); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("activity: %d %s", rec.Code, rec.Body)
+	}
+	if len(activity) < 2 || activity[0].Kind != ActivitySweep || activity[len(activity)-1].Kind != ActivityRun {
+		t.Fatalf("want the run first and the sweep last-written (newest first): %+v", activity)
+	}
+	var newer []Activity
+	json.Unmarshal(call("GET", fmt.Sprintf("/activity?after=%d", activity[0].Seq), "").Body.Bytes(), &newer)
+	if len(newer) != 0 {
+		t.Fatalf("after the newest seq there is nothing: %+v", newer)
+	}
+	if rec := call("GET", "/activity?kind=gossip", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("an unknown kind must be a 400: %d", rec.Code)
+	}
+
+	var summary struct {
+		Rules []RuleSummary `json:"rules"`
+	}
+	rec = call("GET", "/summary", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil || len(summary.Rules) != 1 || summary.Rules[0].RunsTotal != 1 || summary.Rules[0].RunsLast24h != 1 || len(summary.Rules[0].Revisions) != 1 {
+		t.Fatalf("summary: %d %s", rec.Code, rec.Body)
 	}
 }

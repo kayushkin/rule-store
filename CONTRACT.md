@@ -76,6 +76,8 @@ Two paths decide; the uniqueness makes them safe together:
   `field_in state` condition names (all sessions if none). Rules without a time
   condition are not swept.
 
+Frames other than `hello`, `upsert` and `delete` change no session row: `signal` (a session's questions or notifications changed) is ignored, and a type rule-store has never seen is skipped and counted under `reactor.unknown_frames` in `/health` — never a reason to drop the feed, which would reconnect into the same frame and loop.
+
 When the feed's `hello` says anything but `resume: replayed` — first
 connection, a bridge restart, a gap — rule-store reads `GET /sessions` again,
 replaces its copies, forgets sessions the bridge no longer has, and checks every
@@ -103,6 +105,8 @@ rule sweeps it. The comparison's `missed_cards` shows how often that matters.
 | GET | `/rules/{id}/comparison` | `?since=` (default: first activation). For the newest 500 runs, whether each planned effect's result is visible at the owner now (`reached`, `reached_at`, `lead_seconds` = reached − decided), and for each move, `missed_cards`: cards that reached the target column since then, linked to a session no run decided |
 | GET | `/runs` | `?rule_id=&subject_id=&since=&limit=` (100) → newest first |
 | GET | `/subjects/{type}/{id}` | rule-store's copy of a subject and its episode |
+| GET | `/summary` | one read for an overview page: `{counts, reactor, rules:[rule with revisions, activations, runs_total, runs_last_24h, last_decided_at]}` |
+| GET | `/activity` | the reactor's recent activity, newest first, kept in memory (1,000 entries, lost on restart; the journal keeps the same lines): feed connects and drops, full reads, sweeps with counts and timing, runs, errors. `?after=<seq>` returns only newer entries, for polling; `?kind=` one of feed, seed, sweep, run, error; `?limit=` (200) |
 
 `*_by` fields must be principal-store ids (`principal_000001`); rule-store
 cannot check one exists, but refuses a name or an email. Errors are

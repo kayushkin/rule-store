@@ -41,6 +41,8 @@ type Reactor struct {
 	// the ticker skips its turn, and the full check after a seed waits.
 	sweeping sync.Mutex
 
+	activity activityLog
+
 	mu      sync.Mutex
 	changed map[string]bool
 	wake    chan struct{}
@@ -59,19 +61,32 @@ type ReactorStatus struct {
 	ErrorsSinceBoot int    `json:"errors_since_start"`
 	LastError       string `json:"last_error"`
 	LastErrorAt     int64  `json:"last_error_at"`
+	// UnknownFrames counts feed frames of a type this reader does not
+	// handle, by type, so a new frame type upstream is seen, not acted on.
+	UnknownFrames map[string]int `json:"unknown_frames"`
 }
 
 // NewReactor builds a reactor. Run starts it.
 func NewReactor(store *Store, bridge *LLMBridge, facts SessionFacts, sweepInterval time.Duration) *Reactor {
 	return &Reactor{store: store, bridge: bridge, facts: facts, sweepInterval: sweepInterval, clock: time.Now,
-		changed: map[string]bool{}, wake: make(chan struct{}, 1)}
+		changed: map[string]bool{}, wake: make(chan struct{}, 1), status: ReactorStatus{UnknownFrames: map[string]int{}}}
+}
+
+// Activity returns the reactor's recent activity after seq, newest first.
+func (r *Reactor) Activity(after uint64, kind string, limit int) []Activity {
+	return r.activity.since(after, kind, limit)
 }
 
 // Status returns a copy of the reactor's status.
 func (r *Reactor) Status() ReactorStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.status
+	status := r.status
+	status.UnknownFrames = make(map[string]int, len(r.status.UnknownFrames))
+	for event, count := range r.status.UnknownFrames {
+		status.UnknownFrames[event] = count
+	}
+	return status
 }
 
 // fail records an error where /health shows it, and logs it. Nothing the
@@ -79,6 +94,7 @@ func (r *Reactor) Status() ReactorStatus {
 // again, and the count says how often that happened.
 func (r *Reactor) fail(err error) {
 	log.Printf("ERROR: %v", err)
+	r.activity.add(Activity{Kind: ActivityError, Message: err.Error()})
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.status.ErrorsSinceBoot++
@@ -118,6 +134,16 @@ func (r *Reactor) follow(ctx context.Context) {
 			Hello:  func(hello FeedHello) error { return r.onHello(ctx, hello) },
 			Upsert: r.onUpsert,
 			Delete: func(sessionID string) error { return r.store.ForgetSubject(SubjectTypeSession, sessionID) },
+			Unknown: func(event string) error {
+				r.mu.Lock()
+				defer r.mu.Unlock()
+				if r.status.UnknownFrames[event] == 0 {
+					log.Printf("session feed sent a frame type rule-store does not handle, %q; skipping it and every one after", event)
+					r.activity.add(Activity{Kind: ActivityFeed, Message: fmt.Sprintf("the feed sent a frame type rule-store does not handle, %q; skipping it", event)})
+				}
+				r.status.UnknownFrames[event]++
+				return nil
+			},
 		})
 		r.mu.Lock()
 		r.status.FeedConnected = false
@@ -126,6 +152,7 @@ func (r *Reactor) follow(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		r.activity.add(Activity{Kind: ActivityFeed, Message: "session feed disconnected; reconnecting in 5s from event " + lastEventID})
 		r.fail(fmt.Errorf("session feed: %w", err))
 		select {
 		case <-ctx.Done():
@@ -139,6 +166,7 @@ func (r *Reactor) onHello(ctx context.Context, hello FeedHello) error {
 	r.status.FeedConnected = true
 	r.status.FeedStreamID = hello.StreamID
 	r.mu.Unlock()
+	r.activity.add(Activity{Kind: ActivityFeed, Message: fmt.Sprintf("session feed connected (stream %s, resume %s)", hello.StreamID, hello.Resume)})
 	if hello.Resume == "replayed" {
 		return nil
 	}
@@ -224,17 +252,20 @@ func (r *Reactor) Seed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	forgotten := 0
 	for _, subject := range stored {
 		if !present[subject.ID] {
 			if err := r.store.ForgetSubject(SubjectTypeSession, subject.ID); err != nil {
 				return err
 			}
+			forgotten++
 		}
 	}
 	r.mu.Lock()
 	r.status.LastSeedAt, r.status.LastSeedCount = r.clock().Unix(), len(sessions)
 	r.mu.Unlock()
 	log.Printf("read %d sessions", len(sessions))
+	r.activity.add(Activity{Kind: ActivitySeed, Message: fmt.Sprintf("read every session from the bridge: %d, %d no longer there forgotten", len(sessions), forgotten)})
 	// The full check runs beside the feed, not in it: checking every rule
 	// against every session can take minutes, and a feed reader that stops
 	// reading overflows the bridge's buffer and forces another seed.
@@ -256,14 +287,21 @@ func (r *Reactor) Sweep(ctx context.Context, onlyTimeRules bool) error {
 	if err != nil {
 		return err
 	}
+	started := r.clock()
+	r.mu.Lock()
+	runsBefore := r.status.RunsRecorded
+	r.mu.Unlock()
+	rulesChecked, sessionsChecked := 0, 0
 	for _, rule := range rules {
 		if onlyTimeRules && !hasConditionKind(rule.Revision.Definition, ConditionUpdatedBefore) {
 			continue
 		}
+		rulesChecked++
 		subjects, err := r.store.SubjectsInStates(SubjectTypeSession, statesNamedBy(rule.Revision.Definition))
 		if err != nil {
 			return err
 		}
+		sessionsChecked += len(subjects)
 		for _, subject := range subjects {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -273,7 +311,14 @@ func (r *Reactor) Sweep(ctx context.Context, onlyTimeRules bool) error {
 	}
 	r.mu.Lock()
 	r.status.LastSweepAt = r.clock().Unix()
+	newRuns := r.status.RunsRecorded - runsBefore
 	r.mu.Unlock()
+	what := "time rules"
+	if !onlyTimeRules {
+		what = "every rule"
+	}
+	r.activity.add(Activity{Kind: ActivitySweep, Message: fmt.Sprintf("swept %s: %d rules against %d sessions in %s, %d new runs",
+		what, rulesChecked, sessionsChecked, r.clock().Sub(started).Round(time.Millisecond), newRuns)})
 	return nil
 }
 
@@ -371,4 +416,6 @@ func (r *Reactor) decide(ctx context.Context, rule ActiveRule, subject Subject, 
 	r.mu.Lock()
 	r.status.RunsRecorded++
 	r.mu.Unlock()
+	r.activity.add(Activity{Kind: ActivityRun, RuleID: rule.Rule.ID, RunID: run.ID, Subject: subject.ID,
+		Message: fmt.Sprintf("%s matched %s at %s (%s): %d planned effects, shadowed", rule.Rule.ID, subject.ID, triggerKey, cause, len(run.PlannedEffects))})
 }

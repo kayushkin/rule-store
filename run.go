@@ -126,3 +126,30 @@ func (s *Store) ListRuns(f RunFilter) ([]Run, error) {
 	}
 	return runs, rows.Err()
 }
+
+// RuleRunCounts is how many runs a rule has, how many since a moment, and
+// when the newest was decided.
+type RuleRunCounts struct {
+	Total         int
+	Recent        int
+	LastDecidedAt int64
+}
+
+// RunCountsByRule counts runs per rule in one query.
+func (s *Store) RunCountsByRule(recentSince int64) (map[string]RuleRunCounts, error) {
+	rows, err := s.db.Query(`SELECT rule_id, COUNT(*), SUM(CASE WHEN decided_at >= ? THEN 1 ELSE 0 END), MAX(decided_at) FROM rule_runs GROUP BY rule_id`, recentSince)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]RuleRunCounts{}
+	for rows.Next() {
+		var id string
+		var c RuleRunCounts
+		if err := rows.Scan(&id, &c.Total, &c.Recent, &c.LastDecidedAt); err != nil {
+			return nil, err
+		}
+		counts[id] = c
+	}
+	return counts, rows.Err()
+}

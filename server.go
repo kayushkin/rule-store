@@ -39,6 +39,8 @@ func RegisterHandlers(lifetime context.Context, mux *http.ServeMux, store *Store
 	mux.HandleFunc("GET /rules/{id}/comparison", s.comparison)
 	mux.HandleFunc("GET /runs", s.listRuns)
 	mux.HandleFunc("GET /subjects/{type}/{id}", s.getSubject)
+	mux.HandleFunc("GET /activity", s.listActivity)
+	mux.HandleFunc("GET /summary", s.summary)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -274,6 +276,73 @@ func (s *Server) getSubject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, subject)
+}
+
+// listActivity serves the reactor's recent activity, newest first. after is
+// the last seq the caller has, so a page polling it gets only what is new.
+func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	var after uint64
+	if raw := query.Get("after"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("after must be a sequence number, got %q", raw))
+			return
+		}
+		after = parsed
+	}
+	kind := query.Get("kind")
+	if kind != "" {
+		if err := oneOf(kind, ActivityKinds, "activity kind"); err != nil {
+			respondError(w, err)
+			return
+		}
+	}
+	limit := 200
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > activityCapacity {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("limit must be 1 to %d, got %q", activityCapacity, raw))
+			return
+		}
+		limit = parsed
+	}
+	writeJSON(w, http.StatusOK, s.reactor.Activity(after, kind, limit))
+}
+
+// RuleSummary is one rule with its run counts, for an overview page.
+type RuleSummary struct {
+	Rule
+	RunsTotal     int   `json:"runs_total"`
+	RunsLast24h   int   `json:"runs_last_24h"`
+	LastDecidedAt int64 `json:"last_decided_at"`
+}
+
+// summary is everything an overview page shows in one read: the reactor's
+// status, every rule with its active definition and run counts.
+func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
+	rules, err := s.store.ListRules("")
+	if respondError(w, err) {
+		return
+	}
+	counts, err := s.store.RunCountsByRule(time.Now().Add(-24 * time.Hour).Unix())
+	if respondError(w, err) {
+		return
+	}
+	summaries := make([]RuleSummary, 0, len(rules))
+	for _, listed := range rules {
+		full, err := s.store.GetRule(listed.ID)
+		if respondError(w, err) {
+			return
+		}
+		c := counts[listed.ID]
+		summaries = append(summaries, RuleSummary{Rule: *full, RunsTotal: c.Total, RunsLast24h: c.Recent, LastDecidedAt: c.LastDecidedAt})
+	}
+	storeCounts, err := s.store.Counts()
+	if respondError(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"counts": storeCounts, "reactor": s.reactor.Status(), "rules": summaries})
 }
 
 func epochParameter(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
