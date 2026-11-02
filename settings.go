@@ -55,7 +55,7 @@ func SettingDefinitions() []servicesettings.Definition {
 			Description: "kanban-store's base URL. A session's linked cards, their placements and the session's entity tags are read there."},
 		{Key: SettingKanbanStoreServiceToken, EnvironmentVariable: "KANBAN_STORE_SERVICE_TOKEN", Kind: msg.ServiceSettingKindSecret, ValueType: msg.ServiceSettingValueTypeString, Required: true,
 			Description: "kanban-store's service token. Entity tags answer 403 to a principal, so rule-store reads as the service."},
-		{Key: SettingSweepInterval, EnvironmentVariable: "RULE_STORE_SWEEP_INTERVAL", Kind: msg.ServiceSettingKindBehaviour, ValueType: msg.ServiceSettingValueTypeDuration, Default: "1m",
+		{Key: SettingSweepInterval, EnvironmentVariable: "RULE_STORE_SWEEP_INTERVAL", Kind: msg.ServiceSettingKindBehavior, ValueType: msg.ServiceSettingValueTypeDuration, Default: "1m",
 			Description: "How often every active rule is checked against every session rule-store holds. The feed checks a session the moment it changes; the sweep is what notices that time has passed, for conditions such as updated_before."},
 	}
 }
