@@ -49,7 +49,7 @@ func Open(dataDir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	// One writer at a time; SQLite serialises writes anyway, and a single
+	// One writer at a time; SQLite serializes writes anyway, and a single
 	// connection makes "read the max seq, insert seq+1" safe without retries.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
